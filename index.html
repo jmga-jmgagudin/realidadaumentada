@@ -299,11 +299,13 @@
       <a-entity id="interactive-pivot" position="0 0 0" touch-manipulation>
         
         <!-- Entidad donde se inyecta tu archivo GLB auto-calibrado (176 mm -> escala de mesa) -->
-        <a-entity
-          id="user-glb-entity"
-          gltf-model="./GLB_Ensamblaje_Polea.glb"
-          auto-calibrate-glb>
-        </a-entity>
+
+<a-entity
+     id="user-glb-entity"
+     gltf-model="./Gato_mecánico.glb"
+     auto-calibrate-glb>
+   </a-entity>
+
 
         <!-- Modelo de respaldo (Pantalla de Soldadura 3D) visible hasta que se cargue el archivo .glb local -->
         <a-entity id="fallback-helmet" position="0 0.55 0">
