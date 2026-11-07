@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Visor WebAR de Taller - Inspección 3D GLB</title>
+  
+  <!-- A-Frame VR/AR Framework -->
+  <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+  <!-- AR.js para seguimiento óptico de marcadores -->
+  <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+  <!-- Tailwind CSS para interfaz móvil -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+
+    .a-canvas {
+      position: absolute !important;
+      top: 0;
+      left: 0;
+      width: 100% !important;
+      height: 100% !important;
+      z-index: 1;
+    }
+
+    .hud-layer {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    .interactive-ui {
+      pointer-events: auto;
+    }
+  </style>
+
+  <script>
+    // Componente A-Frame para auto-escalar y apoyar el modelo GLB (176.05 mm de alto) sobre la tarjeta
+    AFRAME.registerComponent('auto-calibrate-glb', {
+      init: function () {
+        this.el.addEventListener('model-loaded', () => {
+          const obj = this.el.getObject3D('mesh');
+          if (!obj) return;
+
+          // Calcular la caja envolvente real (corrige el desfase Y = -61.26 y MaxDimension = 176.05)
+          const box = new THREE.Box3().setFromObject(obj);
+          const size = new THREE.Vector3();
+          const center = new THREE.Vector3();
+          box.getSize(size);
+          box.getCenter(center);
+
+          const maxDim = Math.max(size.x, size.y, size.z);
+          // Escalar para que mida 1.5 unidades sobre la tarjeta física
+          const targetSize = 1.5;
+          const scaleFactor = maxDim > 0 ? (targetSize / maxDim) : 0.01;
+
+          obj.scale.set(scaleFactor, scaleFactor, scaleFactor);
+
+          // Centrar en X/Z y apoyar la base inferior (box.min.y) justo sobre la superficie de la mesa (Y = 0)
+          obj.position.x = -center.x * scaleFactor;
+          obj.position.y = -box.min.y * scaleFactor;
+          obj.position.z = -center.z * scaleFactor;
+
+          // Mejorar iluminación y contraste del material PBR original
+          obj.traverse((node) => {
+            if (node.isMesh && node.material) {
+              node.material.metalness = 0.25;
+              node.material.roughness = 0.45;
+              node.material.needsUpdate = true;
+            }
+          });
+
+          const statusText = document.getElementById('glb-status-text');
+          if (statusText) {
+            statusText.textContent = `GLB calibrado (${size.x.toFixed(0)}×${size.y.toFixed(0)}×${size.z.toFixed(0)} mm)`;
+          }
+        });
+      }
+    });
+
+    // Componente para girar y hacer zoom con los dedos o botones en pantalla
+    AFRAME.registerComponent('touch-manipulation', {
+      init: function () {
+        this.touchZone = document.getElementById('touch-zone');
+        this.rotY = 0;
+        this.rotX = 0;
+        this.zoomFactor = 1.0;
+
+        this.isDragging = false;
+        this.prevX = 0;
+        this.prevY = 0;
+        this.initialPinchDist = 0;
+
+        if (this.touchZone) {
+          this.touchZone.addEventListener('touchstart', this.onTouchStart.bind(this), { passive: false });
+          this.touchZone.addEventListener('touchmove', this.onTouchMove.bind(this), { passive: false });
+          this.touchZone.addEventListener('touchend', this.onTouchEnd.bind(this));
+
+          // Soporte para ratón si se prueba en ordenador
+          this.touchZone.addEventListener('mousedown', (e) => {
+            this.isDragging = true;
+            this.prevX = e.clientX;
+            this.prevY = e.clientY;
+          });
+          window.addEventListener('mousemove', (e) => {
+            if (!this.isDragging) return;
+            const dx = e.clientX - this.prevX;
+            const dy = e.clientY - this.prevY;
+            this.rotY += dx * 0.6;
+            this.rotX = Math.max(-75, Math.min(75, this.rotX + dy * 0.5));
+            this.prevX = e.clientX;
+            this.prevY = e.clientY;
+            this.applyTransform();
+          });
+          window.addEventListener('mouseup', () => { this.isDragging = false; });
+        }
+      },
+
+      onTouchStart: function (e) {
+        if (e.touches.length === 1) {
+          this.isDragging = true;
+          this.prevX = e.touches[0].clientX;
+          this.prevY = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+          this.isDragging = false;
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          this.initialPinchDist = Math.hypot(dx, dy);
+        }
+      },
+
+      onTouchMove: function (e) {
+        e.preventDefault();
+        if (e.touches.length === 1 && this.isDragging) {
+          const dx = e.touches[0].clientX - this.prevX;
+          const dy = e.touches[0].clientY - this.prevY;
+
+          this.rotY += dx * 0.65;
+          this.rotX = Math.max(-75, Math.min(75, this.rotX + dy * 0.5));
+
+          this.prevX = e.touches[0].clientX;
+          this.prevY = e.touches[0].clientY;
+          this.applyTransform();
+        } else if (e.touches.length === 2 && this.initialPinchDist > 0) {
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          const dist = Math.hypot(dx, dy);
+          const delta = (dist - this.initialPinchDist) * 0.004;
+
+          this.zoomFactor = Math.max(0.4, Math.min(2.8, this.zoomFactor + delta));
+          this.initialPinchDist = dist;
+          this.applyTransform();
+        }
+      },
+
+      onTouchEnd: function () {
+        this.isDragging = false;
+      },
+
+      rotateStep: function (dY, dX) {
+        this.rotY += dY;
+        this.rotX = Math.max(-75, Math.min(75, this.rotX + dX));
+        this.applyTransform();
+      },
+
+      zoomStep: function (delta) {
+        this.zoomFactor = Math.max(0.4, Math.min(2.8, this.zoomFactor + delta));
+        this.applyTransform();
+      },
+
+      resetView: function () {
+        this.rotY = 0;
+        this.rotX = 0;
+        this.zoomFactor = 1.0;
+        this.applyTransform();
+      },
+
+      applyTransform: function () {
+        this.el.object3D.rotation.set(
+          THREE.MathUtils.degToRad(this.rotX),
+          THREE.MathUtils.degToRad(this.rotY),
+          0
+        );
+        this.el.object3D.scale.set(this.zoomFactor, this.zoomFactor, this.zoomFactor);
+      }
+    });
+  </script>
+</head>
+<body>
+
+  <!-- Superficie táctil transparente para capturar giros con el dedo -->
+  <div id="touch-zone" class="fixed inset-0 z-10"></div>
+
+  <!-- Capa HUD de Controles y Estado -->
+  <div class="hud-layer flex flex-col justify-between p-3 sm:p-5">
+
+    <!-- Barra Superior: Estado del Marcador y Carga de Archivo GLB -->
+    <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+      <div class="interactive-ui bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-2xl px-4 py-2.5 shadow-xl flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5">
+          <span id="marker-dot" class="w-3 h-3 rounded-full bg-amber-400 animate-pulse"></span>
+          <div>
+            <h1 class="text-xs font-bold text-white uppercase tracking-wider">Visor AR de Mesa</h1>
+            <p id="glb-status-text" class="text-[11px] text-slate-300 font-mono">Enfoca la tarjeta Hiro</p>
+          </div>
+        </div>
+
+        <!-- Botón para cargar el archivo .glb desde el móvil u ordenador -->
+        <label class="cursor-pointer bg-sky-600 hover:bg-sky-500 active:scale-95 text-white text-xs font-semibold px-3 py-1.5 rounded-xl shadow transition flex items-center gap-1.5">
+          <span>📂 Cargar .GLB</span>
+          <input id="glb-file-input" type="file" accept=".glb,.gltf" class="hidden">
+        </label>
+      </div>
+
+      <!-- Botón de guía de tarjeta Hiro -->
+      <button id="btn-show-hiro" class="interactive-ui self-end sm:self-auto bg-slate-900/85 hover:bg-slate-800 text-amber-300 border border-amber-500/40 text-xs font-mono px-3 py-2 rounded-xl shadow-lg transition">
+        Ver Tarjeta Hiro
+      </button>
+    </div>
+
+    <!-- Controles Táctiles Inferiores para Girar y Escalar el Objeto -->
+    <div class="flex flex-col items-center gap-2 pb-2">
+      <div class="interactive-ui bg-slate-900/90 backdrop-blur-md border border-slate-700/80 p-2.5 rounded-2xl shadow-2xl flex items-center gap-2">
+        <button id="btn-rot-left" class="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white font-bold text-lg border border-slate-600 flex items-center justify-center" title="Girar Izquierda">
+          ↺
+        </button>
+        <button id="btn-rot-right" class="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white font-bold text-lg border border-slate-600 flex items-center justify-center" title="Girar Derecha">
+          ↻
+        </button>
+        <button id="btn-tilt-up" class="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white font-bold text-sm border border-slate-600 flex items-center justify-center" title="Inclinar">
+          ↕
+        </button>
+        <div class="h-7 w-[1px] bg-slate-700 mx-0.5"></div>
+        <button id="btn-zoom-out" class="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-sky-300 font-bold text-lg border border-slate-600 flex items-center justify-center" title="Reducir">
+          −
+        </button>
+        <button id="btn-zoom-in" class="w-11 h-11 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-sky-300 font-bold text-lg border border-slate-600 flex items-center justify-center" title="Ampliar">
+          +
+        </button>
+        <button id="btn-reset" class="px-3 h-11 rounded-xl bg-amber-600/90 hover:bg-amber-500 active:scale-95 text-white font-semibold text-xs border border-amber-400 flex items-center justify-center">
+          Centrar
+        </button>
+      </div>
+      <p class="text-[11px] text-slate-300 bg-slate-950/70 px-3 py-1 rounded-full font-mono">
+        Desliza 1 dedo para girar 360° • 2 dedos para zoom
+      </p>
+    </div>
+  </div>
+
+  <!-- Modal con el Marcador Hiro para probar desde otra pantalla o imprimir -->
+  <div id="hiro-modal" class="fixed inset-0 z-30 bg-slate-950/90 backdrop-blur-md hidden flex-col items-center justify-center p-4">
+    <div class="bg-white text-slate-900 p-5 rounded-2xl max-w-xs w-full flex flex-col items-center shadow-2xl">
+      <h2 class="text-sm font-bold uppercase tracking-wider mb-1">Tarjeta Marcador HIRO</h2>
+      <p class="text-xs text-slate-600 text-center mb-4">
+        Imprime esta tarjeta o ábrela en otra pantalla y enfócala con la cámara del móvil.
+      </p>
+      <!-- Imagen oficial del patrón Hiro -->
+      <img src="https://raw.githubusercontent.com/AR-js-org/AR.js/master/data/images/hiro.png" alt="Marcador Hiro" class="w-52 h-52 border-4 border-black rounded-lg mb-4">
+      <button id="btn-close-hiro" class="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition">
+        Cerrar y volver a la cámara
+      </button>
+    </div>
+  </div>
+
+  <!-- Escena WebAR (A-Frame + AR.js) -->
+  <a-scene
+    embedded
+    arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix; matrixCodeType: 3x3;"
+    renderer="logarithmicDepthBuffer: true; colorManagement: true; antialias: true;"
+    vr-mode-ui="enabled: false">
+
+    <!-- Iluminación de estudio para resaltar el volumen del GLB -->
+    <a-light type="ambient" color="#ffffff" intensity="0.85"></a-light>
+    <a-light type="directional" color="#ffffff" intensity="0.9" position="2 4 3"></a-light>
+    <a-light type="point" color="#38bdf8" intensity="0.6" position="-2 3 -2"></a-light>
+
+    <!-- Marcador Hiro para la Mesa 1 -->
+    <a-marker id="ar-marker" preset="hiro" smooth="true" smoothCount="5" smoothTolerance="0.01" smoothThreshold="2">
+      
+      <!-- Base circular indicadora sobre la tarjeta física -->
+      <a-ring rotation="-90 0 0" radius-inner="0.7" radius-outer="0.78" color="#38bdf8" opacity="0.5"></a-ring>
+
+      <!-- Pivote interactivo controlado por gestos y botones -->
+      <a-entity id="interactive-pivot" position="0 0 0" touch-manipulation>
+        
+        <!-- Entidad donde se inyecta tu archivo GLB auto-calibrado (176 mm -> escala de mesa) -->
+        <a-entity
+          id="user-glb-entity"
+          gltf-model="./GLB_Ensamblaje_Polea.glb"
+          auto-calibrate-glb>
+        </a-entity>
+
+        <!-- Modelo de respaldo (Pantalla de Soldadura 3D) visible hasta que se cargue el archivo .glb local -->
+        <a-entity id="fallback-helmet" position="0 0.55 0">
+          <a-box width="0.7" height="0.85" depth="0.65" color="#1e293b" material="metalness: 0.5; roughness: 0.4"></a-box>
+          <a-box position="0 0.05 0.34" width="0.52" height="0.32" depth="0.04" color="#0f172a"></a-box>
+          <a-plane position="0 0.05 0.37" width="0.44" height="0.22" color="#065f46" material="emissive: #047857; emissiveIntensity: 0.4"></a-plane>
+          <a-cylinder position="0.38 0.1 0" rotation="0 0 90" radius="0.08" height="0.08" color="#f59e0b"></a-cylinder>
+          <a-cylinder position="-0.38 0.1 0" rotation="0 0 90" radius="0.08" height="0.08" color="#f59e0b"></a-cylinder>
+        </a-entity>
+
+      </a-entity>
+    </a-marker>
+
+    <a-entity camera></a-entity>
+  </a-scene>
+
+  <script>
+    // Lógica de conexión entre los botones de la interfaz y el modelo 3D
+    window.addEventListener('DOMContentLoaded', () => {
+      const marker = document.getElementById('ar-marker');
+      const markerDot = document.getElementById('marker-dot');
+      const statusText = document.getElementById('glb-status-text');
+      const pivotEl = document.getElementById('interactive-pivot');
+      const glbEntity = document.getElementById('user-glb-entity');
+      const fallbackHelmet = document.getElementById('fallback-helmet');
+      const fileInput = document.getElementById('glb-file-input');
+
+      // Detectar cuándo la cámara del móvil ve la tarjeta sobre la mesa
+      marker.addEventListener('markerFound', () => {
+        markerDot.className = 'w-3 h-3 rounded-full bg-emerald-400';
+        statusText.textContent = '¡Objeto anclado en la mesa!';
+      });
+
+      marker.addEventListener('markerLost', () => {
+        markerDot.className = 'w-3 h-3 rounded-full bg-amber-400 animate-pulse';
+        statusText.textContent = 'Enfoca la tarjeta Hiro';
+      });
+
+      // Si carga automáticamente ./modelo.glb desde la carpeta, ocultar el modelo de respaldo
+      glbEntity.addEventListener('model-loaded', () => {
+        fallbackHelmet.setAttribute('visible', 'false');
+      });
+
+      // Permitir cargar el archivo .glb (310 KB) directamente desde el botón en pantalla
+      fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const objectURL = URL.createObjectURL(file);
+        statusText.textContent = `Cargando ${file.name}...`;
+        fallbackHelmet.setAttribute('visible', 'false');
+        glbEntity.setAttribute('gltf-model', objectURL);
+      });
+
+      // Controles de botones en pantalla
+      const getManipulator = () => pivotEl.components['touch-manipulation'];
+
+      document.getElementById('btn-rot-left').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.rotateStep(-25, 0);
+      });
+
+      document.getElementById('btn-rot-right').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.rotateStep(25, 0);
+      });
+
+      document.getElementById('btn-tilt-up').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.rotateStep(0, 20);
+      });
+
+      document.getElementById('btn-zoom-in').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.zoomStep(0.2);
+      });
+
+      document.getElementById('btn-zoom-out').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.zoomStep(-0.2);
+      });
+
+      document.getElementById('btn-reset').addEventListener('click', () => {
+        const comp = getManipulator();
+        if (comp) comp.resetView();
+      });
+
+      // Modal para mostrar la tarjeta Hiro
+      const hiroModal = document.getElementById('hiro-modal');
+      document.getElementById('btn-show-hiro').addEventListener('click', () => {
+        hiroModal.classList.remove('hidden');
+        hiroModal.classList.add('flex');
+      });
+      document.getElementById('btn-close-hiro').addEventListener('click', () => {
+        hiroModal.classList.add('hidden');
+        hiroModal.classList.remove('flex');
+      });
+    });
+  </script>
+</body>
+</html>
